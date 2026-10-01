@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Donkey Kong</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; touch-action: none; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  #touch { position: fixed; left: 0; right: 0; bottom: 0; display: none; justify-content: space-between;
+           align-items: flex-end; padding: 18px; pointer-events: none; }
+  .pad { display: grid; grid-template-columns: repeat(3, 58px); grid-template-rows: repeat(3, 58px); gap: 4px; }
+  .btn { pointer-events: auto; display: flex; align-items: center; justify-content: center;
+         background: rgba(255,255,255,.12); border: 2px solid rgba(255,255,255,.3); border-radius: 12px;
+         color: #fff; font: bold 20px monospace; user-select: none; -webkit-user-select: none; }
+  .btn.on { background: rgba(255,255,255,.35); }
+  .jump { width: 84px; height: 84px; border-radius: 50%; font-size: 16px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="224" height="256"></canvas>
+<div id="touch">
+  <div class="pad">
+    <span></span><div class="btn" data-k="up">▲</div><span></span>
+    <div class="btn" data-k="left">◀</div><span></span><div class="btn" data-k="right">▶</div>
+    <span></span><div class="btn" data-k="down">▼</div><span></span>
+  </div>
+  <div style="display:flex;gap:12px;align-items:flex-end">
+    <div class="btn" data-k="start" style="width:64px;height:40px;font-size:13px">START</div>
+    <div class="btn jump" data-k="jump">JUMP</div>
+  </div>
+</div>
+<script>
+'use strict';
+// ======================================================================
+//  DONKEY KONG — single-file canvas remake (native 224x256, pixel-scaled)
+// ======================================================================
+const W = 224, H = 256;
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = Math.floor(W * s) + 'px';
+  cv.style.height = Math.floor(H * s) + 'px';
+}
+addEventListener('resize', fit);
+fit();
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+// ---------------------------------------------------------------- sprites
+function canvasOf(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+function mirror(src) {
+  const c = canvasOf(src.width, src.height), g = c.getContext('2d');
+  g.translate(src.width, 0); g.scale(-1, 1); g.drawImage(src, 0, 0);
+  return c;
+}
+function sprite(rows, pal) {
+  const c = canvasOf(rows[0].length, rows.length), g = c.getContext('2d');
+  rows.forEach((row, y) => {
+    for (let x = 0; x < row.length; x++) {
+      const col = pal[row[x]];
+      if (col) { g.fillStyle = col; g.fillRect(x, y, 1, 1); }
+    }
+  });
+  return { r: c, l: mirror(c) };
+}
+
+const PAL_MARIO = { R: '#e83018', U: '#2850f0', S: '#ffb888', B: '#803c10', K: '#000', Y: '#ffe040' };
+const MARIO_TOP = [
+  '...RRRRR....',
+  '..RRRRRRRRR.',
+  '..BBBSSKS...',
+  '.BSBSSSKSSS.',
+  '.BSBBSSSKSSS',
+  '.BBSSSSKKKK.',
+  '...SSSSSSS..',
+  '..RRURRR....',
+  '.RRRURRURRR.',
+  'RRRRUUUURRRR',
+];
+const MARIO = {
+  stand: sprite(MARIO_TOP.concat([
+    'SSRUYUUYURSS',
+    'SSSUUUUUUSSS',
+    'SSUUUUUUUUSS',
+    '..UUU..UUU..',
+    '.BBB....BBB.',
+    'BBBB....BBBB',
+  ]), PAL_MARIO),
+  walk: sprite(MARIO_TOP.concat([
+    '.SRUYUUYURS.',
+    '.SSUUUUUUSS.',
+    '..UUUUUUUU..',
+    '...UUUUUU...',
+    '...BB.BBB...',
+    '..BBB..BBB..',
+  ]), PAL_MARIO),
+  jump: sprite(MARIO_TOP.concat([
+    'SSRUYUUYURSS',
+    'SSUUUUUUUUSS',
+    '.UUUUUUUUUU.',
+    'UUUU....UUUU',
+    'BBB......BBB',
+    'BB........BB',
+  ]), PAL_MARIO),
+  climb: sprite([
+    'S..RRRRRR...',
+    'SS.RRRRRRR..',
+    '.S.BBBBBBB..',
+    '.R.BBBBBBB..',
+    '.RRBBBBBBB.S',
+    '.RRRBBBBBRSS',
+    '..RRRRRRRRR.',
+    '..RURRRRURR.',
+    '..RUUUUUUR..',
+    '..UUUUUUUU..',
+    '..UUUUUUUU..',
+    '..UUUUUUUU..',
+    '..UUU..UUU..',
+    '..UUU..UUU..',
+    '.BBBB..UUU..',
+    '.......BBBB.',
+  ], PAL_MARIO),
+};
+
+const PAL_PAULINE = { H: '#ff8020', S: '#ffb888', K: '#000', R: '#e01020', P: '#ff60b0', W: '#fff' };
+const PAULINE_TOP = [
+  '...HHHHH....',
+  '..HHHHHHH...',
+  '.HHSSSSHHH..',
+  '.HSKSSKSHH..',
+  '.HSSSSSSHHH.',
+  '.HHSSRSSHHH.',
+  '..H.SSS.HH..',
+  '...PPPPPP...',
+];
+const PAULINE_BOTTOM = [
+  '..PPPPPPPP..',
+  '..PPPPPPPP..',
+  '.PPPPPPPPPP.',
+  '.PPPPPPPPPP.',
+  'PPPPPPPPPPPP',
+  'PPPPPPPPPPPP',
+  '...SS..SS...',
+  '...SS..SS...',
+  '..KKK..KKK..',
+];
+const PAULINE_A = sprite(PAULINE_TOP.concat(['..PPWPPWPP..', '.SPPPPPPPPS.', 'S.PPPPPPPP.S'], PAULINE_BOTTOM), PAL_PAULINE);
+const PAULINE_B = sprite(PAULINE_TOP.concat(['S.PPWPPWPP.S', '.SPPPPPPPPS.', '..PPPPPPPP..'], PAULINE_BOTTOM), PAL_PAULINE);
+
+const PAL_FIRE = { Y: '#ffd030', R: '#ff4818', K: '#000' };
+const FIRE_BODY = [
+  '.YRRRRRRY.',
+  '.YRYYYYRY.',
+  'YRYKYYKYRY',
+  'YRYKYYKYRY',
+  'YRRYYYYRRY',
+  '.YRRRRRRY.',
+  '..YYYYYY..',
+];
+const FIRE_A = sprite(['...Y...Y..', '..YRY.YRY.', '..YRRYRRY.'].concat(FIRE_BODY), PAL_FIRE);
+const FIRE_B = sprite(['..Y...Y...', '.YRY.YRY..', '.YRRYRRY..'].concat(FIRE_BODY), PAL_FIRE);
+
+const PAL_HAMMER = { H: '#e87820', h: '#a04808', W: '#f8e8b0' };
+const HAM = sprite([
+  'hHHHHHHh',
+  'HHHHHHHH',
+  'HHHHHHHH',
+  'hHHHHHHh',
+  '...WW...',
+  '...WW...',
+  '...WW...',
+  '...WW...',
+  '...WW...',
+  '...WW...',
+], PAL_HAMMER);
+const HAMF = sprite([
+  '......hHHh',
+  '......HHHH',
+  '......HHHH',
+  'WWWWWWHHHH',
+  'WWWWWWHHHH',
+  '......HHHH',
+  '......HHHH',
+  '......hHHh',
+], PAL_HAMMER);
+
+const BARREL_SIDE_ROWS = [
+  '..DOOOOOOD..',
+  '.DODOOOODOD.',
+  'DOODOOOODOOD',
+  'DOODLOOODOOD',
+  'DOODLOOODOOD',
+  'DOODOOOODOOD',
+  'DOODOOOODOOD',
+  'DOODOOOODOOD',
+  '.DODOOOODOD.',
+  '..DOOOOOOD..',
+];
+const BARREL_UP_ROWS = [
+  '..DDDDDDDD..',
+  '.DOOOOOOOOD.',
+  'DOOLLOOOOOOD',
+  'DDDDDDDDDDDD',
+  'DOOLOOOOOOOD',
+  'DOOLOOOOOOOD',
+  'DDDDDDDDDDDD',
+  'DOOLOOOOOOOD',
+  '.DOOOOOOOOD.',
+  '..DDDDDDDD..',
+];
+const PAL_BARREL = { O: '#e07828', D: '#7a2c08', L: '#ffb060' };
+const PAL_BARREL_BLUE = { O: '#40a8ff', D: '#0838a0', L: '#c0e8ff' };
+const BARREL_SIDE = sprite(BARREL_SIDE_ROWS, PAL_BARREL);
+const BARREL_SIDE_BLUE = sprite(BARREL_SIDE_ROWS, PAL_BARREL_BLUE);
+const BARREL_UP = sprite(BARREL_UP_ROWS, PAL_BARREL);
+
+// End-on rolling barrel, generated at 4 rotation steps (cross pattern repeats every 90°).
+function rollBarrel(f, pal) {
+  const c = canvasOf(10, 10), g = c.getContext('2d');
+  const a = f * Math.PI / 8, ca = Math.cos(a), sa = Math.sin(a);
+  for (let y = 0; y < 10; y++) for (let x = 0; x < 10; x++) {
+    const dx = x + 0.5 - 5, dy = y + 0.5 - 5, r = Math.hypot(dx, dy);
+    if (r > 5) continue;
+    let col = pal.O;
+    if (r > 3.9) col = pal.D;
+    else {
+      const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+      if (Math.abs(u) < 0.75 || Math.abs(v) < 0.75) col = pal.D;
+      else if (dx < -1 && dy < -1 && r < 3.2) col = pal.L;
+    }
+    g.fillStyle = col; g.fillRect(x, y, 1, 1);
+  }
+  return c;
+}
+const ROLL = [0, 1, 2, 3].map(f => rollBarrel(f, PAL_BARREL));
+const ROLL_BLUE = [0, 1, 2, 3].map(f => rollBarrel(f, PAL_BARREL_BLUE));
+
+const LIFE = sprite([
+  '..RRR..',
+  '.RRRRR.',
+  '..SSS..',
+  '.RUUUR.',
+  'SUUUUUS',
+  '.UU.UU.',
+  '.BB.BB.',
+], PAL_MARIO);
+const HEART = sprite([
+  '.HH.HH.',
+  'HHHHHHH',
+  'HHHHHHH',
+  '.HHHHH.',
+  '..HHH..',
+  '...H...',
+], { H: '#ff3080' });
+const GIRDER_TILE = sprite([
+  'GGGGGGGG',
+  '.G....G.',
+  '..G..G..',
+  '...GG...',
+  '...GG...',
+  '..G..G..',
+  '.G....G.',
+  'GGGGGGGG',
+], { G: '#e8174f' }).r;
+
+// --------------------------------------------------------------- 5x7 font
+const FONT = {
+  '0': [14, 17, 19, 21, 25, 17, 14], '1': [4, 12, 4, 4, 4, 4, 14], '2': [14, 17, 1, 2, 4, 8, 31],
+  '3': [31, 2, 4, 2, 1, 17, 14], '4': [2, 6, 10, 18, 31, 2, 2], '5': [31, 16, 30, 1, 1, 17, 14],
+  '6': [6, 8, 16, 30, 17, 17, 14], '7': [31, 1, 2, 4, 8, 8, 8], '8': [14, 17, 17, 14, 17, 17, 14],
+  '9': [14, 17, 17, 15, 1, 2, 12],
+  A: [14, 17, 17, 31, 17, 17, 17], B: [30, 17, 17, 30, 17, 17, 30], C: [14, 17, 16, 16, 16, 17, 14],
+  D: [28, 18, 17, 17, 17, 18, 28], E: [31, 16, 16, 30, 16, 16, 31], F: [31, 16, 16, 30, 16, 16, 16],
+  G: [14, 17, 16, 23, 17, 17, 15], H: [17, 17, 17, 31, 17, 17, 17], I: [14, 4, 4, 4, 4, 4, 14],
+  J: [7, 2, 2, 2, 2, 18, 12], K: [17, 18, 20, 24, 20, 18, 17], L: [16, 16, 16, 16, 16, 16, 31],
+  M: [17, 27, 21, 21, 17, 17, 17], N: [17, 17, 25, 21, 19, 17, 17], O: [14, 17, 17, 17, 17, 17, 14],
+  P: [30, 17, 17, 30, 16, 16, 16], Q: [14, 17, 17, 17, 21, 18, 13], R: [30, 17, 17, 30, 20, 18, 17],
+  S: [15, 16, 16, 14, 1, 1, 30], T: [31, 4, 4, 4, 4, 4, 4], U: [17, 17, 17, 17, 17, 17, 14],
+  V: [17, 17, 17, 17, 17, 10, 4], W: [17, 17, 17, 21, 21, 21, 10], X: [17, 17, 10, 4, 10, 17, 17],
+  Y: [17, 17, 17, 10, 4, 4, 4], Z: [31, 1, 2, 4, 8, 16, 31],
+  '!': [4, 4, 4, 4, 4, 0, 4], '=': [0, 0, 31, 0, 31, 0, 0], '-': [0, 0, 0, 31, 0, 0, 0],
+  '.': [0, 0, 0, 0, 0, 12, 12], ':': [0, 12, 12, 0, 12, 12, 0], '/': [1, 1, 2, 4, 8, 16, 16],
+  '?': [14, 17, 1, 2, 4, 0, 4], '+': [0, 4, 4, 31, 4, 4, 0], ',': [0, 0, 0, 0, 12, 4, 8],
+};
+const glyphCache = {};
+function glyph(ch, col) {
+  const key = ch + col;
+  if (!glyphCache[key]) {
+    const c = canvasOf(5, 7), g = c.getContext('2d');
+    g.fillStyle = col;
+    FONT[ch].forEach((bits, y) => { for (let x = 0; x < 5; x++) if (bits & (16 >> x)) g.fillRect(x, y, 1, 1); });
+    glyphCache[key] = c;
+  }
+  return glyphCache[key];
+}
+function text(s, x, y, col = '#fff', sc = 1) {
+  s = String(s).toUpperCase();
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== ' ') ctx.drawImage(glyph(s[i], col), Math.round(x + i * 6 * sc), Math.round(y), 5 * sc, 7 * sc);
+  }
+}
+function ctext(s, y, col, sc = 1) { text(s, Math.round((W - (String(s).length * 6 - 1) * sc) / 2), y, col, sc); }
+function box(x, y, w, h) {
+  ctx.fillStyle = '#4060ff'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#000'; ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+}
+const pad6 = n => String(n).padStart(6, '0');
+
+// ------------------------------------------------------------ level layout
+// Each girder: x-range and top-surface y at left/right ends; built from 8px
+// stepped segments (optionally flat up to `flat`), like the arcade original.
+const GIRDERS = [
+  { x1: 0,  x2: 224, yL: 248, yR: 241, flat: 112 },
+  { x1: 0,  x2: 208, yL: 208, yR: 215 },
+  { x1: 16, x2: 224, yL: 182, yR: 175 },
+  { x1: 0,  x2: 208, yL: 142, yR: 149 },
+  { x1: 16, x2: 224, yL: 116, yR: 109 },
+  { x1: 0,  x2: 208, yL: 80,  yR: 84, flat: 144 },
+  { x1: 88, x2: 136, yL: 46,  yR: 46 },            // Pauline's perch
+];
+const TOP = GIRDERS.length - 1;
+
+function surf(g, x) {
+  const G = GIRDERS[g];
+  const start = G.flat ?? G.x1;
+  if (x < start) return G.yL;
+  const n = Math.round((G.x2 - start) / 8);
+  const i = clamp(Math.floor((x - start) / 8), 0, n - 1);
+  const t = G.flat != null ? (i + 1) / n : i / (n - 1);
+  return G.yL + Math.round(t * (G.yR - G.yL));
+}
+const girderDir = g => GIRDERS[g].yR > GIRDERS[g].yL ? 1 : -1;   // downhill direction
+
+const LADDERS = [
+  [0, 80, true], [0, 184],
+  [1, 40], [1, 96],
+  [2, 64, true], [2, 168],
+  [3, 32], [3, 104],
+  [4, 96, true], [4, 184],
+  [5, 128],
+].map(([lo, x, broken]) => ({ lo, hi: lo + 1, x, broken: !!broken, top: surf(lo + 1, x), bot: surf(lo, x) }));
+
+const HAMMER_SPOTS = [{ g: 1, x: 170 }, { g: 4, x: 24 }];
+const DK_X = 24, DK_Y = 48;
+
+// Static background: ladders under girders.
+const BG = canvasOf(W, H);
+(function buildBackground() {
+  const g = BG.getContext('2d');
+  g.fillStyle = '#28d8e8';
+  for (const l of LADDERS) {
+    const parts = l.broken ? [[l.top, l.top + 13], [l.bot - 9, l.bot]] : [[l.top, l.bot]];
+    for (const [a, b] of parts) {
+      g.fillRect(l.x - 4, a, 1, b - a);
+      g.fillRect(l.x + 3, a, 1, b - a);
+      for (let y = b - 3; y > a; y -= 4) g.fillRect(l.x - 4, y, 8, 1);
+    }
+  }
+  GIRDERS.forEach((G, i) => {
+    for (let x = G.x1; x < G.x2; x += 8) g.drawImage(GIRDER_TILE, x, surf(i, x + 4));
+  });
+})();
+
+// ------------------------------------------------------------------ audio
+let AC = null, master = null, noiseBuf = null, muted = false;
+function initAudio() {
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!AC && Ctor) {
+    AC = new Ctor();
+    master = AC.createGain(); master.gain.value = 0.6; master.connect(AC.destination);
+    noiseBuf = AC.createBuffer(1, AC.sampleRate / 2, AC.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function tone(f, d, { type = 'square', v = 0.06, to = null, at = 0 } = {}) {
+  if (!AC || muted) return;
+  const t = AC.currentTime + at, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (to) o.frequency.exponentialRampToValueAtTime(to, t + d);
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g).connect(master); o.start(t); o.stop(t + d + 0.05);
+}
+function noise(d, v = 0.1, at = 0) {
+  if (!AC || muted) return;
+  const t = AC.currentTime + at, s = AC.createBufferSource(), g = AC.createGain();
+  s.buffer = noiseBuf;
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  s.connect(g).connect(master); s.start(t); s.stop(t + d);
+}
+const SFX = {
+  jump()   { tone(330, 0.16, { v: 0.05, to: 880 }); },
+  walk()   { tone(90, 0.04, { type: 'triangle', v: 0.12 }); },
+  score()  { tone(1047, 0.07, { v: 0.05 }); tone(1568, 0.12, { v: 0.05, at: 0.07 }); },
+  pickup() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.08, { v: 0.05, at: i * 0.06 })); },
+  smash()  { noise(0.18, 0.2); tone(300, 0.18, { type: 'sawtooth', v: 0.05, to: 60 }); },
+  toss()   { tone(110, 0.15, { type: 'triangle', v: 0.2, to: 50 }); },
+  oil()    { noise(0.3, 0.12); },
+  bounce() { tone(160, 0.06, { type: 'triangle', v: 0.1, to: 90 }); },
+  oneup()  { [784, 988, 1175, 1568].forEach((f, i) => tone(f, 0.1, { v: 0.05, at: i * 0.08 })); },
+  death() {
+    [880, 830, 784, 740, 698, 659, 622, 587, 554, 523].forEach((f, i) => tone(f, 0.07, { v: 0.05, at: i * 0.07 }));
+    tone(196, 0.5, { type: 'triangle', v: 0.15, at: 0.9 });
+  },
+  win() { [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => tone(f, 0.14, { v: 0.06, at: i * 0.12 })); },
+};
+const BASS = [98, 0, 0, 98, 131, 0, 147, 0, 98, 0, 0, 98, 165, 0, 147, 131];
+const HAMMER_TUNE = [523, 659, 784, 659, 523, 659, 784, 1047, 880, 784, 659, 784, 698, 587, 523, 0];
+
+// ------------------------------------------------------------------ input
+const keys = {}, pressed = new Set();
+const KEYMAP = {
+  ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
+  ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down',
+  Space: 'jump', KeyZ: 'jump', KeyX: 'jump', Enter: 'start', KeyP: 'pause', KeyM: 'mute',
+};
+addEventListener('keydown', e => {
+  const k = KEYMAP[e.code]; if (!k) return;
+  e.preventDefault(); initAudio();
+  if (!e.repeat) pressed.add(k);
+  keys[k] = true;
+});
+addEventListener('keyup', e => { const k = KEYMAP[e.code]; if (k) { e.preventDefault(); keys[k] = false; } });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+document.querySelectorAll('[data-k]').forEach(el => {
+  const k = el.dataset.k;
+  const on = e => { e.preventDefault(); initAudio(); if (!keys[k]) pressed.add(k); keys[k] = true; el.classList.add('on'); };
+  const off = e => { e.preventDefault(); keys[k] = false; el.classList.remove('on'); };
+  el.addEventListener('pointerdown', on);
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => el.addEventListener(ev, off));
+});
+cv.addEventListener('pointerdown', () => { initAudio(); if (state === 'title' || state === 'gameover') pressed.add('start'); });
+if (matchMedia('(pointer: coarse)').matches) document.getElementById('touch').style.display = 'flex';
+
+// ------------------------------------------------------------- game state
+let state = 'title', timer = 0, frame = 0;
+let level = 1, lives = 3, score = 0, extraGiven = false;
+let hi = Number(localStorage.getItem('dk_hi')) || 0;
+let M, DK, barrels, fires, pops, fx, hammers, oil, bonus, bonusT, musicT, firstBarrel;
+
+const barrelSpeed = () => Math.min(0.9 + 0.1 * (level - 1), 1.5);
+const fireSpeed = () => Math.min(0.35 + 0.06 * (level - 1), 0.75);
+const maxFires = () => Math.min(1 + level, 5);
+const bonusStart = () => Math.min(5000 + 1000 * (level - 1), 8000);
+const wildChance = () => Math.min(0.06 + 0.04 * (level - 1), 0.3);
+const nextWait = () => Math.max(20, 120 - level * 15) + Math.random() * Math.max(30, 100 - level * 10);
+
+function newGame() {
+  level = 1; lives = 3; score = 0; extraGiven = false;
+  startStage();
+  state = 'intro'; timer = 150;
+}
+
+function startStage() {
+  barrels = []; fires = []; pops = []; fx = [];
+  M = { x: 44, y: surf(0, 44), g: 0, state: 'ground', vx: 0, vy: 0, face: 1, ladder: null,
+        anim: 0, moving: false, hammer: 0, jumpY: 0, scored: new Set() };
+  DK = { state: 'wait', t: 0, wait: 50, blue: true, wild: false };
+  hammers = HAMMER_SPOTS.map(h => ({ x: h.x, y: surf(h.g, h.x) - 27, taken: false }));
+  oil = { lit: false, flare: 0 };
+  bonus = bonusStart(); bonusT = 0; musicT = 0; firstBarrel = true;
+}
+
+function addScore(n, x, y) {
+  score += n;
+  if (x != null) pops.push({ x, y, t: 60, txt: String(n) });
+  if (!extraGiven && score >= 7000) { extraGiven = true; lives++; SFX.oneup(); }
+  if (score > hi) { hi = score; localStorage.setItem('dk_hi', hi); }
+}
+
+function die() {
+  if (state !== 'play') return;
+  state = 'dying'; timer = 0; M.state = 'dead';
+  SFX.death();
+}
+
+function winStage() {
+  state = 'win'; timer = 0; M.face = -1;
+  addScore(bonus, 128, 34);
+  SFX.win();
+}
+
+// ------------------------------------------------------------------ kong
+function updateDK() {
+  DK.t++;
+  switch (DK.state) {
+    case 'wait':
+      if (DK.t >= DK.wait) {
+        DK.state = 'grab'; DK.t = 0;
+        DK.blue = firstBarrel;
+        DK.wild = !firstBarrel && Math.random() < wildChance();
+      }
+      break;
+    case 'grab':
+      if (DK.t >= 16) { DK.state = 'hold'; DK.t = 0; }
+      break;
+    case 'hold':
+      if (DK.t >= 16) { DK.state = 'throw'; DK.t = 0; spawnBarrel(DK.blue, DK.wild); firstBarrel = false; }
+      break;
+    case 'throw':
+      if (DK.t >= 16) { DK.state = 'wait'; DK.t = 0; DK.wait = nextWait(); }
+      break;
+  }
+}
+function dkPose() {
+  if (DK.state === 'grab') return 'left';
+  if (DK.state === 'hold') return 'hold';
+  if (DK.state === 'throw') return 'throw';
+  if (DK.wait > 90 && DK.t < 48) return (DK.t >> 3) & 1 ? 'beatL' : 'beatR';
+  return 'idle';
+}
+function spawnBarrel(blue, wild) {
+  const b = { x: 70, y: surf(5, 70), g: 5, state: 'roll', vx: 0, vy: 0, blue, rot: 0, yo: 0, hv: 0, lastL: null, next: 4 };
+  if (wild) { b.state = 'wild'; b.x = 66; b.y = 72; b.vx = 0.4; }
+  barrels.push(b);
+  SFX.toss();
+}
+
+// ----------------------------------------------------------------- mario
+function updateMario() {
+  const mv = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  if (M.hammer > 0) M.hammer--;
+  M.moving = false;
+
+  if (M.state === 'ground') {
+    if (!M.hammer && keys.up) {
+      const l = LADDERS.find(l => !l.broken && l.lo === M.g && Math.abs(l.x - M.x) <= 4);
+      if (l) { M.state = 'climb'; M.ladder = l; M.x = l.x; return; }
+    }
+    if (!M.hammer && keys.down) {
+      const l = LADDERS.find(l => !l.broken && l.hi === M.g && Math.abs(l.x - M.x) <= 4);
+      if (l) { M.state = 'climb'; M.ladder = l; M.x = l.x; M.y = l.top + 1; return; }
+    }
+    if (!M.hammer && pressed.has('jump')) {
+      M.state = 'jump'; M.vy = -2.1; M.vx = mv * 0.85; M.jumpY = M.y; M.scored = new Set();
+      if (mv) M.face = mv;
+      SFX.jump();
+      return;
+    }
+    if (mv) {
+      M.face = mv; M.x = clamp(M.x + mv * 0.8, 6, 218); M.moving = true;
+      if (M.anim++ % 8 === 0) SFX.walk();
+    }
+    const G = GIRDERS[M.g];
+    if (M.x < G.x1 || M.x > G.x2) { M.state = 'fall'; M.vx = mv * 0.5; M.vy = 0; M.jumpY = M.y; M.scored = new Set(); }
+    else M.y = surf(M.g, M.x);
+  } else if (M.state === 'climb') {
+    const l = M.ladder;
+    if (keys.up) {
+      M.y -= 0.7; M.anim++;
+      if (M.y <= l.top) {
+        M.y = l.top; M.g = l.hi; M.state = 'ground'; M.ladder = null;
+        if (M.g === TOP) { winStage(); return; }
+      }
+    } else if (keys.down) {
+      M.y += 0.7; M.anim++;
+      if (M.y >= l.bot) { M.y = l.bot; M.g = l.lo; M.state = 'ground'; M.ladder = null; }
+    }
+  } else if (M.state === 'jump' || M.state === 'fall') {
+    const py = M.y;
+    M.vy = Math.min(M.vy + 0.12, 3); M.x += M.vx; M.y += M.vy;
+    if (M.x < 6) { M.x = 6; M.vx = Math.abs(M.vx); }
+    if (M.x > 218) { M.x = 218; M.vx = -Math.abs(M.vx); }
+    if (M.vy > 0) {
+      for (let i = 0; i < GIRDERS.length; i++) {
+        const G = GIRDERS[i];
+        if (M.x < G.x1 || M.x > G.x2) continue;
+        const s = surf(i, M.x);
+        if (py <= s && M.y >= s) {
+          M.y = s; M.g = i; M.vx = 0;
+          if (s - M.jumpY > 20) { die(); return; }   // fell too far
+          M.state = 'ground';
+          break;
+        }
+      }
+    }
+  }
+
+  for (const h of hammers) {
+    if (!h.taken && overlap({ x: M.x - 5, y: M.y - 16, w: 10, h: 16 }, { x: h.x - 4, y: h.y, w: 8, h: 10 })) {
+      h.taken = true; M.hammer = 600; SFX.pickup();
+    }
+  }
+  if (overlap({ x: M.x - 4, y: M.y - 13, w: 8, h: 12 }, { x: DK_X + 6, y: DK_Y + 2, w: 28, h: 30 })) die();
+}
+
+function hammerZones() {
+  const front = M.face > 0 ? { x: M.x + 2, y: M.y - 14, w: 14, h: 14 } : { x: M.x - 16, y: M.y - 14, w: 14, h: 14 };
+  return [front, { x: M.x - 7, y: M.y - 30, w: 14, h: 16 }];
+}
+
+// --------------------------------------------------------------- barrels
+function ladderChance(l, b) {
+  let p = 0.12 + 0.03 * level;
+  if (M.g < b.g) { p += 0.15; if (Math.abs(M.x - l.x) < 32) p += 0.2; }
+  return Math.min(p, 0.6);
+}
+
+function hitOil(b) {
+  oil.lit = true; oil.flare = 40; SFX.oil();
+  if (b.blue || (fires.length < maxFires() && Math.random() < 0.5)) {
+    fires.push({ x: 16, y: 230, g: 0, state: 'spawn', vx: 0.6, vy: -1.6, dir: 1, cdir: 0, ladder: null, cd: 60, t: 0 });
+  }
+}
+
+function updateBarrels() {
+  const bs = barrelSpeed();
+  for (const b of barrels) {
+    if (b.hv || b.yo) { b.yo += b.hv; b.hv += 0.2; if (b.yo >= 0) { b.yo = 0; b.hv = 0; } }
+
+    if (b.state === 'roll') {
+      const G = GIRDERS[b.g], dir = girderDir(b.g), px = b.x;
+      b.x += dir * bs; b.rot += dir * bs;
+      if (b.g === 0 && b.x <= 26) { b.dead = true; hitOil(b); continue; }
+      for (const l of LADDERS) {
+        if (l.hi !== b.g || l === b.lastL) continue;
+        if ((px - l.x) * (b.x - l.x) <= 0) {
+          b.lastL = l;
+          if (Math.random() < ladderChance(l, b)) { b.state = 'ladder'; b.ladder = l; b.x = l.x; }
+          break;
+        }
+      }
+      if (b.state !== 'roll') continue;
+      if (b.x > G.x2 + 3 || b.x < G.x1 - 3) { b.state = 'fall'; b.vx = dir * 0.5; b.vy = 0; }
+      else b.y = surf(b.g, b.x);
+    } else if (b.state === 'ladder') {
+      b.y += bs * 0.9;
+      if (b.y >= b.ladder.bot) { b.y = b.ladder.bot; b.g = b.ladder.lo; b.state = 'roll'; }
+    } else if (b.state === 'fall') {
+      b.vy = Math.min(b.vy + 0.15, 3); b.x += b.vx; b.y += b.vy;
+      const t = b.g - 1, s = surf(t, b.x);
+      if (b.y >= s) { b.y = s; b.g = t; b.state = 'roll'; b.hv = -1.2; b.lastL = null; }
+    } else if (b.state === 'wild') {
+      b.vy = Math.min(b.vy + 0.1, 2.4); b.x += b.vx; b.y += b.vy;
+      if (b.x < 12) { b.x = 12; b.vx = Math.abs(b.vx); }
+      if (b.x > 212) { b.x = 212; b.vx = -Math.abs(b.vx); }
+      const t = b.next, s = surf(t, b.x);
+      if (b.vy > 0 && b.y >= s) {
+        b.y = s; SFX.bounce();
+        if (t === 0) { b.state = 'roll'; b.g = 0; }
+        else { b.next = t - 1; b.vy = -1.8; b.vx = (M.x >= b.x ? 1 : -1) * (0.3 + Math.random() * 0.5); }
+      }
+    }
+  }
+  barrels = barrels.filter(b => !b.dead);
+}
+
+// ------------------------------------------------------------- fireballs
+function updateFires() {
+  const fs = fireSpeed();
+  for (const f of fires) {
+    f.t++;
+    if (f.state === 'spawn') {
+      f.vy += 0.08; f.x += f.vx; f.y += f.vy;
+      const s = surf(0, f.x);
+      if (f.vy > 0 && f.y >= s) { f.y = s; f.state = 'walk'; }
+      continue;
+    }
+    if (f.state === 'climb') {
+      const l = f.ladder;
+      f.y += f.cdir * fs * 0.9;
+      if (f.cdir < 0 && f.y <= l.top) { f.y = l.top; f.g = l.hi; f.state = 'walk'; f.cd = 60; }
+      else if (f.cdir > 0 && f.y >= l.bot) { f.y = l.bot; f.g = l.lo; f.state = 'walk'; f.cd = 60; }
+      continue;
+    }
+    if (Math.random() < 1 / 150) f.dir = -f.dir;
+    if (M.g === f.g && Math.random() < 1 / 60) f.dir = M.x > f.x ? 1 : -1;
+    const G = GIRDERS[f.g], px = f.x;
+    f.x += f.dir * fs;
+    if (f.x < G.x1 + 6) { f.x = G.x1 + 6; f.dir = 1; }
+    if (f.x > G.x2 - 6) { f.x = G.x2 - 6; f.dir = -1; }
+    f.y = surf(f.g, f.x);
+    if (f.cd > 0) { f.cd--; continue; }
+    for (const l of LADDERS) {
+      if (l.broken || l.hi === TOP || (px - l.x) * (f.x - l.x) > 0) continue;
+      if (l.lo === f.g && Math.random() < (M.g > f.g ? 0.7 : 0.25)) { f.state = 'climb'; f.cdir = -1; f.ladder = l; f.x = l.x; break; }
+      if (l.hi === f.g && Math.random() < (M.g < f.g ? 0.7 : 0.2)) { f.state = 'climb'; f.cdir = 1; f.ladder = l; f.x = l.x; break; }
+      f.cd = 10;
+    }
+  }
+}
+
+// ------------------------------------------------------------ collisions
+function smash(x, y, pts) {
+  fx.push({ x, y, t: 0 });
+  addScore(pts, x, y - 10);
+  SFX.smash();
+}
+
+function checkCollisions() {
+  const mb = { x: M.x - 4, y: M.y - 13, w: 8, h: 12 };
+  const zones = M.hammer > 0 ? hammerZones() : null;
+  const smashable = bx => zones && (overlap(bx, zones[0]) || overlap(bx, zones[1]));
+  const jumping = M.state === 'jump';
+  const jumpedOver = o => jumping && !M.scored.has(o) && Math.abs(o.x - M.x) < 7 && o.y > M.y && o.y - M.y < 28;
+
+  for (const b of barrels) {
+    const bx = { x: b.x - 4, y: b.y + b.yo - 9, w: 8, h: 8 };
+    if (smashable(bx)) { b.dead = true; smash(b.x, b.y + b.yo - 5, [300, 500, 800][Math.random() * 3 | 0]); continue; }
+    if (overlap(mb, bx)) { die(); return; }
+    if (jumpedOver(b)) { M.scored.add(b); addScore(100, b.x, b.y - 18); SFX.score(); }
+  }
+  for (const f of fires) {
+    const fb = { x: f.x - 3, y: f.y - 8, w: 6, h: 7 };
+    if (smashable(fb)) { f.dead = true; smash(f.x, f.y - 5, 500); continue; }
+    if (overlap(mb, fb)) { die(); return; }
+    if (jumpedOver(f)) { M.scored.add(f); addScore(100, f.x, f.y - 18); SFX.score(); }
+  }
+  barrels = barrels.filter(b => !b.dead);
+  fires = fires.filter(f => !f.dead);
+}
+
+function updateFx() {
+  for (const e of fx) e.t++;
+  fx = fx.filter(e => e.t < 24);
+  for (const p of pops) p.t--;
+  pops = pops.filter(p => p.t > 0);
+}
+
+function playMusic() {
+  musicT++;
+  if (M.hammer > 0) {
+    if (musicT % 8 === 0) { const n = HAMMER_TUNE[(musicT >> 3) % HAMMER_TUNE.length]; if (n) tone(n, 0.07, { v: 0.035 }); }
+  } else if (musicT % 15 === 0) {
+    const n = BASS[(musicT / 15 | 0) % BASS.length];
+    if (n) tone(n, 0.14, { type: 'triangle', v: 0.12 });
+  }
+}
+
+function updatePlay() {
+  updateDK();
+  updateMario();
+  if (state !== 'play') return;
+  updateBarrels();
+  updateFires();
+  checkCollisions();
+  if (state !== 'play') return;
+  updateFx();
+  if (oil.flare > 0) oil.flare--;
+  if (++bonusT >= 120) {
+    bonusT = 0; bonus = Math.max(0, bonus - 100);
+    if (bonus === 0) { die(); return; }
+  }
+  playMusic();
+}
+
+function update() {
+  frame++;
+  if (pressed.has('mute')) muted = !muted;
+  switch (state) {
+    case 'title':
+      if (pressed.has('start') || pressed.has('jump')) newGame();
+      break;
+    case 'intro':
+    case 'ready':
+      if (--timer <= 0) state = 'play';
+      break;
+    case 'play':
+      if (pressed.has('pause')) { state = 'paused'; break; }
+      updatePlay();
+      break;
+    case 'paused':
+      if (pressed.has('pause') || pressed.has('start')) state = 'play';
+      break;
+    case 'dying':
+      if (++timer >= 150) {
+        lives--;
+        if (lives <= 0) { state = 'gameover'; timer = 0; }
+        else { startStage(); state = 'ready'; timer = 90; }
+      }
+      break;
+    case 'win':
+      updateFx();
+      if (++timer >= 210) { level++; startStage(); state = 'intro'; timer = 150; }
+      break;
+    case 'gameover':
+      timer++;
+      if (timer > 60 && (pressed.has('start') || pressed.has('jump'))) state = 'title';
+      break;
+  }
+  pressed.clear();
+}
+
+// -------------------------------------------------------------- drawing
+function drawDK(x, y, pose, blue) {
+  const B = '#b84a10', D = '#6a2408', T = '#ffc488', Wt = '#fff', K = '#000';
+  const r = (c, a, b, w, h) => { ctx.fillStyle = c; ctx.fillRect(x + a, y + b, w, h); };
+  r(B, 8, 22, 9, 8); r(B, 23, 22, 9, 8);
+  r(T, 5, 29, 11, 3); r(T, 24, 29, 11, 3);
+  r(B, 7, 10, 26, 15);
+  r(T, 12, 13, 16, 10);
+  r(D, 19, 14, 2, 8); r(D, 13, 18, 5, 1); r(D, 22, 18, 5, 1);
+  const armL = () => { r(B, 1, 11, 7, 14); r(T, 0, 24, 8, 4); };
+  const armR = () => { r(B, 32, 11, 7, 14); r(T, 32, 24, 8, 4); };
+  switch (pose) {
+    case 'beatL': r(B, 1, 11, 7, 8); r(B, 5, 13, 9, 5); r(T, 11, 11, 6, 6); r(B, 32, 11, 7, 8); r(B, 26, 17, 9, 5); r(T, 23, 17, 6, 6); break;
+    case 'beatR': r(B, 1, 11, 7, 8); r(B, 5, 17, 9, 5); r(T, 11, 17, 6, 6); r(B, 32, 11, 7, 8); r(B, 26, 13, 9, 5); r(T, 23, 11, 6, 6); break;
+    case 'left':  r(B, -5, 13, 13, 6); r(T, -9, 12, 5, 8); armR(); break;
+    case 'throw': armL(); r(B, 32, 13, 13, 6); r(T, 44, 12, 5, 8); break;
+    case 'hold':  r(B, 3, -4, 7, 17); r(B, 30, -4, 7, 17); r(T, 3, -8, 7, 5); r(T, 30, -8, 7, 5); break;
+    default: armL(); armR();
+  }
+  r(B, 12, 0, 16, 13); r(B, 15, -1, 10, 1);
+  r(T, 14, 5, 12, 7);
+  r(D, 13, 3, 14, 2);
+  r(Wt, 15, 5, 4, 3); r(Wt, 21, 5, 4, 3);
+  r(K, 17, 6, 2, 2); r(K, 21, 6, 2, 2);
+  r(T, 13, 9, 14, 4);
+  r(K, 15, 10, 10, 1); r(Wt, 16, 11, 8, 1);
+  if (pose === 'hold') ctx.drawImage((blue ? BARREL_SIDE_BLUE : BARREL_SIDE).r, x + 14, y - 12);
+}
+
+function drawOil() {
+  const x = 8, y = 232;
+  if (oil.lit) {
+    const big = oil.flare > 0;
+    for (let i = 0; i < 5; i++) {
+      const h = ((big ? 7 : 3) + (Math.sin(frame * 0.6 + i * 1.7) + 1) * (big ? 3 : 1.5)) | 0;
+      const fx0 = x + 1 + i * 3;
+      ctx.fillStyle = '#ff4010'; ctx.fillRect(fx0, y - h, 3, h);
+      ctx.fillStyle = '#ffe040'; ctx.fillRect(fx0 + 1, y - h + 1, 1, Math.max(1, h - 2));
+    }
+  }
+  ctx.fillStyle = '#1848e8'; ctx.fillRect(x, y, 16, 16);
+  ctx.fillStyle = '#80b8ff'; ctx.fillRect(x, y, 16, 2); ctx.fillRect(x, y + 14, 16, 2); ctx.fillRect(x, y + 11, 16, 1);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x + 2, y + 4, 3, 1); ctx.fillRect(x + 2, y + 8, 3, 1); ctx.fillRect(x + 2, y + 4, 1, 5); ctx.fillRect(x + 4, y + 4, 1, 5); // O
+  ctx.fillRect(x + 6, y + 4, 3, 1); ctx.fillRect(x + 6, y + 8, 3, 1); ctx.fillRect(x + 7, y + 4, 1, 5);                              // I
+  ctx.fillRect(x + 10, y + 4, 1, 5); ctx.fillRect(x + 10, y + 8, 3, 1);                                                            // L
+}
+
+function drawMario() {
+  const x = Math.round(M.x), y = Math.round(M.y);
+  if (M.state === 'dead') {
+    const k = timer < 64 ? (timer >> 3) % 4 : 1;
+    ctx.save();
+    ctx.translate(x, y - (k % 2 ? 6 : 8));
+    ctx.rotate(k * Math.PI / 2);
+    ctx.drawImage(MARIO.stand.r, -6, -8);
+    ctx.restore();
+    return;
+  }
+  if (M.state === 'climb') {
+    const s = (M.y >> 2) & 1 ? MARIO.climb.r : MARIO.climb.l;
+    ctx.drawImage(s, x - 6, y - 16);
+    return;
+  }
+  let s;
+  if (M.state === 'jump' || M.state === 'fall') s = MARIO.jump;
+  else s = M.moving && (M.anim >> 2) & 1 ? MARIO.walk : MARIO.stand;
+  ctx.drawImage(M.face > 0 ? s.r : s.l, x - 6, y - 16);
+  if (M.hammer > 0 && !(M.hammer < 120 && (frame >> 2) & 1)) {
+    if (((frame >> 3) & 1) === 0) ctx.drawImage(M.face > 0 ? HAM.r : HAM.l, x - 4 + M.face * 3, y - 26);
+    else ctx.drawImage(M.face > 0 ? HAMF.r : HAMF.l, M.face > 0 ? x + 2 : x - 12, y - 12);
+  }
+}
+
+function drawStage() {
+  ctx.drawImage(BG, 0, 0);
+  drawOil();
+  for (const h of hammers) if (!h.taken) ctx.drawImage(HAM.r, h.x - 4, h.y);
+
+  ctx.drawImage(BARREL_UP.r, 0, 60); ctx.drawImage(BARREL_UP.r, 12, 60);
+  ctx.drawImage(BARREL_UP.r, 0, 70); ctx.drawImage(BARREL_UP.r, 12, 70);
+  drawDK(DK_X, DK_Y, dkPose(), DK.blue);
+
+  const waving = state !== 'win' && frame % 160 < 64;
+  ctx.drawImage((waving && (frame >> 3) & 1 ? PAULINE_B : PAULINE_A).r, 96, 26);
+  if (waving) text('HELP!', 62, 32, '#4ef');
+
+  for (const b of barrels) {
+    const bx = Math.round(b.x), by = Math.round(b.y + b.yo);
+    if (b.state === 'roll' || b.state === 'fall') {
+      const i = ((Math.floor(b.rot / 2.5) % 4) + 4) % 4;
+      ctx.drawImage((b.blue ? ROLL_BLUE : ROLL)[i], bx - 5, by - 10);
+    } else {
+      ctx.drawImage((b.blue ? BARREL_SIDE_BLUE : BARREL_SIDE).r, bx - 6, by - 10);
+    }
+  }
+  for (const f of fires) {
+    const s = (f.t >> 2) & 1 ? FIRE_B : FIRE_A;
+    ctx.drawImage(f.dir < 0 ? s.l : s.r, Math.round(f.x) - 5, Math.round(f.y) - 10 - ((f.t >> 3) & 1));
+  }
+
+  drawMario();
+
+  for (const e of fx) {
+    const rad = 2 + e.t * 0.5;
+    ctx.fillStyle = ['#fff', '#ffe040', '#ff6020'][(e.t >> 2) % 3];
+    for (let k = 0; k < 8; k++) {
+      const a = k * Math.PI / 4 + e.t * 0.1;
+      ctx.fillRect(Math.round(e.x + Math.cos(a) * rad) - 1, Math.round(e.y + Math.sin(a) * rad) - 1, 2, 2);
+    }
+    if (e.t < 8) ctx.fillRect(Math.round(e.x) - 3, Math.round(e.y) - 3, 6, 6);
+  }
+  for (const p of pops) text(p.txt, Math.round(p.x - (p.txt.length * 6 - 1) / 2), Math.round(p.y), '#fff');
+
+  if (state === 'win') ctx.drawImage(HEART.r, 113, 30);
+}
+
+function drawHUD() {
+  text('1UP', 16, 2, '#ff3030');
+  text(pad6(score), 8, 10, '#fff');
+  text('HIGH SCORE', 72, 2, '#ff3030');
+  text(pad6(hi), 87, 10, '#fff');
+  text('L=' + String(level).padStart(2, '0'), 184, 2, '#4060ff');
+  box(172, 19, 44, 20);
+  text('BONUS', 179, 21, '#4ef');
+  text(String(bonus).padStart(4, '0'), 182, 30, bonus <= 1000 && frame % 30 < 15 ? '#ff3030' : '#fff');
+  for (let i = 0; i < lives - 1; i++) ctx.drawImage(LIFE.r, 8 + i * 9, 20);
+  if (muted) text('MUTE', 190, 42, '#888');
+}
+
+function renderTitle() {
+  ctext('DONKEY', 26, '#ff4020', 3);
+  ctext('KONG', 54, '#ff4020', 3);
+  drawDK(92, 88, (frame >> 3) & 1 ? 'beatL' : 'beatR');
+  for (let x = 64; x < 160; x += 8) ctx.drawImage(GIRDER_TILE, x, 120);
+  ctext('ARROWS/WASD : MOVE, CLIMB', 140, '#4ef');
+  ctext('SPACE / Z : JUMP', 150, '#4ef');
+  ctext('JUMP BARRELS FOR POINTS', 164, '#fff');
+  ctext('GRAB A HAMMER TO SMASH THEM', 174, '#fff');
+  ctext('RESCUE PAULINE AT THE TOP!', 184, '#ff60b0');
+  ctext('P PAUSE    M MUTE', 198, '#888');
+  if (frame % 60 < 40) ctext('PRESS ENTER TO START', 216, '#ffe040');
+  ctext('HIGH SCORE ' + pad6(hi), 240, '#ff3030');
+}
+
+function renderIntro() {
+  ctext('LEVEL ' + level, 40, '#ff3030', 2);
+  drawDK(92, 100, (frame >> 3) & 1 ? 'beatL' : 'beatR');
+  for (let x = 72; x < 152; x += 8) ctx.drawImage(GIRDER_TILE, x, 132);
+  ctext('HOW HIGH CAN YOU GET ?', 170, '#fff');
+  ctext(25 * level + ' M', 190, '#4ef');
+}
+
+function render() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  if (state === 'title') return renderTitle();
+  if (state === 'intro') return renderIntro();
+  drawStage();
+  drawHUD();
+  if (state === 'ready') { box(76, 124, 72, 18); ctext('READY!', 130, '#ffe040'); }
+  else if (state === 'paused') { box(76, 124, 72, 18); ctext('PAUSED', 130, '#fff'); }
+  else if (state === 'gameover') {
+    box(56, 112, 112, 36);
+    ctext('GAME OVER', 120, '#ff3030');
+    if (timer > 60 && frame % 60 < 40) ctext('PRESS ENTER', 134, '#fff');
+  }
+}
+
+// ------------------------------------------------------------- main loop
+const STEP = 1000 / 60;
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(250, now - last);
+  last = now;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
